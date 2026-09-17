@@ -51,6 +51,7 @@ describe("demo-api", () => {
       const info = await request(server, "GET", "/api/v1/info");
       assert.equal(info.status, 200);
       assert.equal(info.body.service, "demo-api");
+      assert.match(info.body.message, /rollout test/);
     } finally {
       server.close();
     }

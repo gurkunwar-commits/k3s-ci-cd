@@ -21,7 +21,7 @@ app.get("/api/v1/info", (_req, res) => {
   res.status(200).json({
     service: "demo-api",
     version,
-    message: "Hello from the k3s CI/CD demo API",
+    message: "Hello from the k3s CI/CD demo API — rollout test",
     time: new Date().toISOString(),
   });
 });
