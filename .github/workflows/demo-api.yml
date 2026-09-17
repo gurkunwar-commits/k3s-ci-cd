@@ -1,0 +1,182 @@
+name: demo-api
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "demo-api/**"
+      - ".github/workflows/demo-api.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "demo-api/**"
+      - ".github/workflows/demo-api.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: demo-api-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/demo-api
+  APP_DIR: demo-api
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: demo-api
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: demo-api/package.json
+
+      - name: Install and test
+        run: |
+          npm install
+          npm test
+
+  build-and-push:
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.short_sha }}
+      image_digest: ${{ steps.push.outputs.digest }}
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags
+        id: meta
+        run: |
+          SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          {
+            echo "tags<<EOF"
+            echo "${IMAGE_NAME}:${SHORT_SHA}"
+            echo "${IMAGE_NAME}:${GITHUB_SHA}"
+            echo "${IMAGE_NAME}:latest"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.APP_DIR }}
+          file: ${{ env.APP_DIR }}/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Make GHCR package public (first-time friendly)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OWNER="${{ github.repository_owner }}"
+          PKG="demo-api"
+          gh api \
+            --method PATCH \
+            -H "Accept: application/vnd.github+json" \
+            "/user/packages/container/${PKG}" \
+            -f visibility=public \
+            || gh api \
+              --method PATCH \
+              -H "Accept: application/vnd.github+json" \
+              "/orgs/${OWNER}/packages/container/${PKG}" \
+              -f visibility=public \
+            || echo "Could not set package visibility automatically; set it public in GitHub Packages UI or add an imagePullSecret."
+
+      - name: Update Kubernetes image tag in Git
+        env:
+          SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
+          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          MANIFEST="${APP_DIR}/k8s/deployment.yaml"
+          NEW_IMAGE="${IMAGE_NAME}:${SHORT_SHA}"
+
+          python3 - <<'PY'
+          import os, pathlib, re
+
+          manifest = pathlib.Path(os.environ["APP_DIR"]) / "k8s" / "deployment.yaml"
+          sha = os.environ["SHORT_SHA"]
+          image = f'{os.environ["IMAGE_NAME"]}:{sha}'
+          text = manifest.read_text()
+          text = re.sub(
+              r"image:\s*ghcr\.io/.+/demo-api:\S+",
+              f"image: {image}",
+              text,
+              count=1,
+          )
+          text = re.sub(
+              r"(name:\s*APP_VERSION\n\s*value:\s*)\"[^\"]*\"",
+              rf'\1"{sha}"',
+              text,
+              count=1,
+          )
+          manifest.write_text(text)
+          print(f"Updated {manifest} -> {image}")
+          PY
+
+          if git diff --quiet -- "${MANIFEST}"; then
+            echo "Manifest already points at ${NEW_IMAGE}"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "${MANIFEST}"
+          git commit -m "$(cat <<EOF
+          deploy(demo-api): roll out ${SHORT_SHA}
+
+          Image: ${NEW_IMAGE}
+          Digest: ${IMAGE_DIGEST}
+
+          [skip ci]
+          EOF
+          )"
+          git push
+
+      - name: Summary
+        run: |
+          {
+            echo "## demo-api published"
+            echo ""
+            echo "- Image: \`${IMAGE_NAME}:${{ steps.meta.outputs.short_sha }}\`"
+            echo "- Digest: \`${{ steps.push.outputs.digest }}\`"
+            echo "- Manifest: \`demo-api/k8s/deployment.yaml\` updated on \`main\`"
+            echo ""
+            echo "Portainer (Tailscale-only) should **poll** this repo and reconcile."
+            echo "GitHub Actions cannot reach Portainer webhooks over the public internet."
+          } >> "$GITHUB_STEP_SUMMARY"

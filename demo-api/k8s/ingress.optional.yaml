@@ -1,0 +1,30 @@
+# Optional public Ingress for demo-api.
+# Replace demo-api.example.com with your real hostname before applying,
+# or skip this file and reach the Service in-cluster / via port-forward.
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: demo-api
+  namespace: demo
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-staging
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - demo-api.example.com
+      secretName: demo-api-tls
+  rules:
+    - host: demo-api.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: demo-api
+                port:
+                  number: 80
